@@ -4,6 +4,9 @@
 import re
 import html
 import os
+import hmac
+import hashlib
+import time
 from urllib.parse import urlparse
 import json
 import requests
@@ -88,6 +91,43 @@ client = Telnyx(api_key=telnyx.api_key)
 # --- Initialisation du module Mailgun ---
 MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY")
 MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN")
+MAILGUN_SIGNING_KEY = os.getenv("MAILGUN_SIGNING_KEY")
+
+# Maximum age of a webhook timestamp before it is rejected (5 minutes)
+MAX_TIMESTAMP_AGE = 300
+
+
+def verify_mailgun_signature(timestamp, token, signature):
+    """
+    Verify the Mailgun webhook HMAC-SHA256 signature.
+    Concatenate timestamp + token, sign with the Webhook Signing Key,
+    and compare to the provided signature.
+    Also rejects requests where the timestamp is more than MAX_TIMESTAMP_AGE
+    seconds old to prevent replay attacks.
+    """
+    # Reject stale timestamps
+    try:
+        age = abs(time.time() - int(timestamp))
+        if age > MAX_TIMESTAMP_AGE:
+            logger.warning(f"Webhook timestamp too old: {age:.0f}s")
+            return False
+    except (ValueError, TypeError):
+        logger.warning("Invalid webhook timestamp.")
+        return False
+
+    # Compute expected signature
+    expected = hmac.new(
+        MAILGUN_SIGNING_KEY.encode(),
+        msg=f"{timestamp}{token}".encode(),
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, signature):
+        logger.warning("Mailgun signature verification failed.")
+        return False
+
+    logger.debug("Mailgun signature verified successfully.")
+    return True
 
 # --- Initialisation du module AWS S3 ---
 _s3_client = None
@@ -403,6 +443,18 @@ def inbound_email():
     connection_id = os.getenv("TELNYX_FAX_CONNECTION_ID")
     data = dict(request.form)
     logger.debug(f"Received form data: {data}")
+
+    timestamp = data.get("timestamp", "")
+    token = data.get("token", "")
+    signature = data.get("signature", "")
+
+    if not all([timestamp, token, signature]):
+        logger.warning("Missing signature fields in webhook payload.")
+        return Response(status=403)
+
+    if not verify_mailgun_signature(timestamp, token, signature):
+        return Response(status=403)
+
     try:
         to_field = data["To"]
         to_number_raw = to_field.split("@")[0].strip().strip("'").strip('"')
