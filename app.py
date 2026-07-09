@@ -138,7 +138,11 @@ def get_s3_client():
         _s3_client = boto3.client(
             "s3",
             region_name=region,
-            config=Config(signature_version='s3v4')
+            endpoint_url=f"https://s3.{region}.amazonaws.com",   # pin the regional endpoint
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "virtual"},              # bucket in host, no redirect
+            ),
         )
     return _s3_client
 
